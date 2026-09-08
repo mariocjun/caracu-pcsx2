@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "upstream_pcsx2_commit": "98697735f1bb1a1452d975251269abd1019876d1",
+  "source_repository": "https://github.com/PCSX2/pcsx2-windows-dependencies",
+  "release_tag_at_download": "latest-windows-dependencies",
+  "release_asset_id": 542946624,
+  "release_asset_created_at": "2026-09-03T15:18:13Z",
+  "archive": "pcsx2-windows-dependencies.7z",
+  "download_url": "https://github.com/PCSX2/pcsx2-windows-dependencies/releases/download/latest-windows-dependencies/pcsx2-windows-dependencies.7z",
+  "size_bytes": 163411806,
+  "sha256": "007aac347c325c5531e51914c6ed12ed7e57b7915d4f1d93af50ec78a61f3475",
+  "note": "The release tag is mutable. Reject a mismatching archive; do not silently refresh this lock. This bundle includes Qt, but the Caracu host must build with ENABLE_QT_UI=OFF. Archive identity does not certify compiler ABI compatibility or a successful backend build."
+}
