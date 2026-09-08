@@ -13,13 +13,11 @@ D3D11 surfaceless rendering, a CPU-thread command queue, and JSON-RPC on child
 stdin/stdout. Logs use stderr; no network listener. Each child owns a private
 datapath; never open the user's ordinary PCSX2 configuration or memory cards.
 
-Before implementing the host, establish a supported compiler and dependency
-build. Local preflight on 2026-09-08 found MinGW GCC 15.2.0 but no usable MSVC
-or clang-cl installation. The user subsequently approved package installation.
-Build Tools 2022 17.14.39 was launched with the VCTools workload, recommended
-components, `--quiet --wait --norestart`; at this checkpoint, Windows UAC still
-requires the user's confirmation. No successful MSVC build is claimed yet.
-This is not a claim that PCSX2 itself cannot build on Windows.
+The user approved package installation and completed Windows UAC on 2026-09-08.
+Build Tools 2022 **17.14.39** installed successfully, with **MSVC 19.44.35228.0**
+(toolset directory 14.44.35207) and **Windows SDK 10.0.26100.0**. The installer
+reports complete/launchable and no reboot required. Existing emulators and
+profiles were not changed.
 
 The official Windows dependency bundle has been downloaded and extracted into
 an isolated `PS2Dev/pcsx2-deps-20260903-007aac34` directory outside both repos.
@@ -29,11 +27,43 @@ The pinned upstream dependency script prefers VS2022 to VS2026. The bundle
 contains Qt as well as core libraries; its presence on disk does not mean the
 future executable links Qt. That needs a separate dependency/runtime check.
 
-After UAC/install completion, verify the actual MSVC toolset and Windows SDK,
-then configure an isolated build with `ENABLE_QT_UI=OFF`, `USE_OPENGL=OFF`,
-`USE_VULKAN=OFF`, and `CMAKE_PREFIX_PATH` pointing to the extracted `deps`.
-Linking the upstream `pcsx2-gsrunner` can check the dependency closure, but
-cannot satisfy the game-host gate. Do not replace the missing server with it.
+## Reproducible build preflight
+
+From PowerShell, pass the bundle directory containing the archive and `deps`:
+
+```powershell
+./tools/caracu/build-windows.ps1 -DependencyBundle C:/path/to/verified-bundle -Autoteste
+./tools/caracu/build-windows.ps1 -DependencyBundle C:/path/to/verified-bundle
+./tools/caracu/build-windows.ps1 -DependencyBundle C:/path/to/verified-bundle -Target unittests
+```
+
+`-CheckOnly` checks prerequisites without configuring or building. Wrong archive
+identity is rejected before configuration; software installation is separate.
+The default output is `build-caracu-windows`. The script preserves the caller's
+PATH/INCLUDE/LIB/LIBPATH and console encoding, and does not run an emulator.
+It configures `ENABLE_QT_UI=OFF`, `USE_OPENGL=OFF`, `USE_VULKAN=OFF` and uses
+the native Ninja bundled with VS. Existing build trees are never cleaned.
+
+MSVC's Portuguese `/showIncludes` output exposed a CMake CP850/UTF-8 mismatch:
+the first builds recorded zero header dependencies. Merely setting VSLANG=1033
+did not fix this installation, which only has Portuguese language resources.
+The script aligns the console encoding before the initial CMake compiler probe.
+Use a **new build directory** when migrating from a corrupted compiler cache.
+`-Autoteste` generates an original isolated fixture: its output must change
+17 → 29 → 41 after two header-only edits, and Ninja must record `value.hpp`.
+Its generated files are retained for inspection, not committed.
+
+The initial core build also found D3D.cpp including Vulkan headers while Vulkan
+was disabled. Its include guard now follows ENABLE_VULKAN, matching its usage.
+After that correction, all 692 steps completed, linking `pcsx2-gsrunner.exe`.
+The executable's direct PE imports contain no Qt DLLs. It was **not launched**:
+the upstream runner initializes configuration even before handling help/version
+arguments. No game boot, rendering, process-window or runtime-DLL gate is implied.
+Do not replace the missing `caracu-ps2d` with this GS dump runner.
+
+`-Target unittests` also completed: **2/2 CTest executables passed**
+(`common_test`, `core_test`), without BIOS or media. This validates their
+selected unit cases, not instruction stepping, synchronization or gameplay.
 
 Acceptance requires actual boot, no Qt DLLs/windows, correct 128-bit register
 values, real instruction execution (not PC increments), separately measured
