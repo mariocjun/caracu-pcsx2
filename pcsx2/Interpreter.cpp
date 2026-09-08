@@ -8,6 +8,7 @@
 #include "Cache.h"
 
 #include "DebugTools/Breakpoints.h"
+#include "DebugTools/Step.h"
 
 #include "common/FastJmp.h"
 
@@ -23,6 +24,8 @@ static std::string disOut;
 static bool intExitExecution = false;
 static fastjmp_buf intJmpBuf;
 static u32 intLastBranchTo;
+static bool s_debug_step_active = false;
+static u32 s_debug_step_dispatched = 0;
 
 void intEventTest();
 
@@ -213,6 +216,8 @@ static void execI()
 
 	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 
+	if (s_debug_step_active)
+		++s_debug_step_dispatched;
 	opcode.interpret();
 }
 
@@ -584,7 +589,41 @@ static void intSafeExitExecution()
 static void intCancelInstruction()
 {
 	// See execute function.
-	fastjmp_jmp(&intJmpBuf, 0);
+	fastjmp_jmp(&intJmpBuf, s_debug_step_active ? 2 : 0);
+}
+
+EEDebugStepResult ExecuteEEDebugStep()
+{
+	pxAssert(VMManager::GetState() == VMState::Paused && !s_debug_step_active);
+	R5900cpu* const previous_cpu = Cpu;
+	const bool previous_rec = EmuConfig.Cpu.Recompiler.EnableEE;
+	const bool previous_wait_loop = EmuConfig.Speedhacks.WaitLoop;
+	const u32 start_cycle = cpuRegs.cycle;
+	writebackCache();
+	Cpu = &intCpu;
+	EmuConfig.Cpu.Recompiler.EnableEE = false;
+	EmuConfig.Speedhacks.WaitLoop = false;
+	s_debug_step_active = true;
+	s_debug_step_dispatched = 0;
+	intExitExecution = false;
+
+	// intCpu.Step by itself has no valid jump context. Branch/event exits and
+	// instruction cancellation must land here, never in an old Execute stack.
+	const int reason = fastjmp_set(&intJmpBuf);
+	if (reason == 0)
+	{
+		execI();
+		if (cpuRegs.cycle == start_cycle)
+			intUpdateCPUCycles();
+	}
+
+	writebackCache();
+	s_debug_step_active = false;
+	intExitExecution = false;
+	Cpu = previous_cpu;
+	EmuConfig.Cpu.Recompiler.EnableEE = previous_rec;
+	EmuConfig.Speedhacks.WaitLoop = previous_wait_loop;
+	return {s_debug_step_dispatched, reason == 2, reason == 1};
 }
 
 static void intExecute()

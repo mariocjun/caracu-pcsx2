@@ -12,8 +12,9 @@ Use a new build directory when changing compiler language or toolchains.
 param(
     [Parameter(Mandatory = $true)][string]$DependencyBundle,
     [string]$BuildDirectory,
-    [ValidateSet('pcsx2-gsrunner', 'PCSX2', 'unittests')]
+    [ValidateSet('caracu-ps2d', 'pcsx2-gsrunner', 'PCSX2', 'unittests')]
     [string]$Target = 'pcsx2-gsrunner',
+    [string]$PackageDirectory,
     [ValidateRange(1, 64)][int]$Jobs = 8,
     [switch]$CheckOnly,
     [switch]$Autoteste
@@ -21,6 +22,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ($CheckOnly -and $Autoteste) { throw 'Choose CheckOnly or Autoteste, not both.' }
+if ($PackageDirectory -and ($Target -ne 'caracu-ps2d' -or $CheckOnly -or $Autoteste)) {
+    throw 'PackageDirectory requires a real caracu-ps2d build.'
+}
 $taskRepo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $taskLock = Get-Content (Join-Path $taskRepo 'caracu-windows-dependencies.lock.json') -Raw | ConvertFrom-Json
 $taskBundle = (Resolve-Path -LiteralPath $DependencyBundle).Path
@@ -119,6 +123,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'No-Qt CMake configuration failed.' }
     & $taskCmake --build $BuildDirectory --target $Target --parallel $Jobs
     if ($LASTEXITCODE -ne 0) { throw "Build failed: $Target" }
+    if ($PackageDirectory) {
+        $taskPackage = [IO.Path]::GetFullPath($PackageDirectory)
+        if (Test-Path -LiteralPath $taskPackage) { throw 'Package directory must be new; nothing will be overwritten.' }
+        & $taskCmake "-DEXECUTABLE=$BuildDirectory/caracu-ps2d/caracu-ps2d.exe" `
+            "-DDEPENDENCIES=$taskDeps" "-DDESTINATION=$taskPackage" "-DSOURCE=$taskRepo" `
+            -P (Join-Path $PSScriptRoot 'package-windows.cmake')
+        if ($LASTEXITCODE -ne 0) { throw 'No-Qt package validation failed.' }
+    }
 } finally {
     [Console]::OutputEncoding = $taskSavedEncoding
     foreach ($taskName in $taskSavedEnv.Keys) {

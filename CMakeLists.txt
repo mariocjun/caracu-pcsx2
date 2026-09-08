@@ -48,6 +48,11 @@ add_subdirectory(common)
 # make pcsx2
 add_subdirectory(pcsx2)
 
+# Standalone stdio host; no dependency on the Qt frontend.
+if(WIN32)
+	add_subdirectory(caracu-ps2d EXCLUDE_FROM_ALL)
+endif()
+
 if(ENABLE_QT_UI)
 	add_subdirectory(pcsx2-qt)
 endif()

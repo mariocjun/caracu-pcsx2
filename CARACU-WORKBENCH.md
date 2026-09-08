@@ -3,9 +3,9 @@
 This fork preserves PCSX2 upstream history and licenses. Integration branch:
 `codex/headless-host`, based on `98697735f1bb1a1452d975251269abd1019876d1`.
 
-Status: bootstrap only. **There is no implemented or certified `caracu-ps2d`
-target yet.** Do not treat the upstream Qt executable or GS dump runner as
-that server. The parent toolkit implementation is tracked at
+Status: **`caracu-ps2d` is implemented with bounded live tests; the complete
+Workbench/native steering proof is not finished.** Do not substitute the
+upstream Qt executable or GS dump runner for this server. Integration is tracked at
 https://github.com/mariocjun/caracu/pull/4.
 
 The selected contract is a Windows x64 MSVC host with `ENABLE_QT_UI=OFF`,
@@ -59,7 +59,7 @@ After that correction, all 692 steps completed, linking `pcsx2-gsrunner.exe`.
 The executable's direct PE imports contain no Qt DLLs. It was **not launched**:
 the upstream runner initializes configuration even before handling help/version
 arguments. No game boot, rendering, process-window or runtime-DLL gate is implied.
-Do not replace the missing `caracu-ps2d` with this GS dump runner.
+The separate host implementation and runtime evidence follow below.
 
 `-Target unittests` also completed: **2/2 CTest executables passed**
 (`common_test`, `core_test`), without BIOS or media. This validates their
@@ -74,3 +74,76 @@ must not be advertised as coverage of every DMA write.
 Do not commit BIOS, ROMs, savestates, dumps or reconstructed commercial game
 source. Preserve SPDX headers and notices when adapting existing host code.
 No upstream source in this fork is relicensed to the toolkit's MIT license.
+
+## Implemented host (AI-assisted)
+
+`caracu-ps2d/Main.cpp` owns the CPU loop and a bounded JSON-RPC stdin queue;
+stdout is reserved for protocol replies, including when core code prints.
+The input pipe is polled so EOF/shutdown can join the reader without waiting
+forever on a console read. There is no TCP listener or Qt dependency.
+
+Each launch requires an absolute, previously nonexistent `--session-dir`.
+The host never calls the personal/portable profile fallback. `--bios` is copied
+privately, including the location where fresh NVM/MEC may be generated. Settings
+stay in memory, physical input sources are inert, memory-card slots are disabled,
+audio uses an emulated SPU2 with null output, and D3D11 has a surfaceless target.
+`--help` and `--version` are processed before all VM/config initialization.
+
+Protocol v1 is newline-delimited JSON-RPC requests (not batch/notifications),
+1 MiB maximum line and 64 queued callbacks. `hello` lists implemented methods.
+All other calls need `params.session` and `params.generation`. Reset, stop and
+state load invalidate generations. RAM access requires explicit pause, supports
+bounded physical/KSEG aliases, and rejects MMIO. EE/IOP registers use hex with
+128-bit storage; the category also declares its real width.
+
+Methods cover boot/pause/resume/reset/stop/shutdown, RAM read/write, registers,
+CPU execution/read/write breakpoints, frame advance, controller bindings/input,
+private savestate tokens and PNG capture. `ee.step` calls the real interpreter
+with a valid jump context and reports dispatched instructions, cancellation and
+event exit. A branch can include its delay slot. This does not implement IOP
+step or certify all exception/COP/VU paths. CPU watchpoints do not cover DMA.
+Frame advance replies only after returning paused at the requested VSync count.
+
+Use the MIT Python process adapter in the separate Caracu repo, not copied core
+code. It journals commands, hashes the executable/media/BIOS, and disallows
+further commands after transport timeout because their outcome is uncertain.
+The exact executable SHA identifies dirty builds; `hello` also reports the base
+commit and whether the source was dirty at configure time.
+
+### Bounded evidence and remaining limits
+
+Caracu's `mcp/tests/test_sessions_live.py` and `test_sessions_mcp.py` passed eight
+integration tests against the locally packaged host without a dependency PATH
+override. Original MIPS code increments a counter and loads both nonzero halves
+of a 128-bit GPR. Tests cover separate sessions, stale generations, invalid JSON,
+oversized requests, profile reuse, pause/resume, writes/readback, reset, executable
+breakpoints, a real arithmetic/store/branch+nonempty-delay-slot sequence, a CPU
+write watchpoint, VSync advance, private save/load, input binding validation,
+transport timeout policy and actual MCP requests.
+
+Windows process inspection at the synthetic guest's paused state found no
+top-level windows or Qt modules; D3D11 was loaded. This is a sampled runtime
+check, not proof about every possible driver/platform. Original Armageddon and
+GoW II ISOs each ran 600 VSyncs, returned the expected ELF identifiers and
+produced nonuniform 640x480 offscreen PNGs. GoW II reached its menu; Armageddon
+was at its opening legal screen. Repeated paused captures matched. Input hashes
+and metadata of 1,387 personal-profile files were unchanged. This is not an
+entire-game, gameplay determinism, or steering equivalence certification.
+
+The test that armed an EE breakpoint before BIOS/ELF startup exceeded its
+25-second boot observation window. The retained test now establishes an
+executing ELF before arming the breakpoint. Pre-ELF debugger latency remains
+unqualified; do not promise a universal boot deadline.
+
+### Local packaging
+
+```powershell
+./tools/caracu/build-windows.ps1 -DependencyBundle C:/path/to/verified-bundle -Target caracu-ps2d -PackageDirectory C:/new/package-directory
+```
+
+Packaging resolves the PE dependency closure, rejects Qt, copies non-system
+DLLs/resources/notices and refuses an existing destination. Windows and the
+MSVC runtime remain prerequisites; DLLs loaded on demand need separate tests.
+No BIOS, game image, state or game-derived code belongs in this package. Keep
+the corresponding source and notices with distributions; the package is a local
+development artifact, not a signed or universally compatible release.

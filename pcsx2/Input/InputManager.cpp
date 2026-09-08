@@ -1829,16 +1829,17 @@ bool InputManager::IsInputSourceEnabled(SettingsInterface& si, InputSourceType t
 template <typename T>
 void InputManager::UpdateInputSourceState(SettingsInterface& si, std::unique_lock<std::mutex>& settings_lock, InputSourceType type)
 {
+	const bool external_only = si.GetBoolValue("InputSources", "ExternalOnly", false);
 	if (!s_input_sources[static_cast<u32>(type)])
 	{
 		std::unique_ptr<InputSource> source = std::make_unique<T>();
-		if (!source->Initialize(si, settings_lock))
+		if (!external_only && !source->Initialize(si, settings_lock))
 			Console.Error("(InputManager) Source '%s' failed to initialize.", InputSourceToString(type));
 
 		s_input_sources[static_cast<u32>(type)] = std::move(source);
 	}
 
-	const bool enabled = IsInputSourceEnabled(si, type);
+	const bool enabled = !external_only && IsInputSourceEnabled(si, type);
 	if (enabled)
 	{
 		if (s_input_sources[static_cast<u32>(type)]->IsInitialized())
@@ -1870,6 +1871,9 @@ void InputManager::UpdateInputSourceState(SettingsInterface& si, std::unique_loc
 
 void InputManager::ReloadSources(SettingsInterface& si, std::unique_lock<std::mutex>& settings_lock)
 {
+	// Keep inert source objects: PollSources and binding lookup require them.
+	// ExternalOnly suppresses initialization, not object construction. Default
+	// false preserves the desktop frontend's behavior.
 	UpdateInputSourceState<SDLInputSource>(si, settings_lock, InputSourceType::SDL);
 #ifdef _WIN32
 	UpdateInputSourceState<DInputSource>(si, settings_lock, InputSourceType::DInput);
