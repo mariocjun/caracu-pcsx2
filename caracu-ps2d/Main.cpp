@@ -5,12 +5,14 @@
 #include "pcsx2/PrecompiledHeader.h"
 #include "pcsx2/DebugTools/DebugInterface.h"
 #include "pcsx2/DebugTools/Breakpoints.h"
+#include "pcsx2/DebugTools/CallTrace.h"
 #include "pcsx2/DebugTools/Step.h"
 #include "pcsx2/GS.h"
 #include "pcsx2/Host.h"
 #include "pcsx2/ImGui/FullscreenUI.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "pcsx2/MTGS.h"
+#include "pcsx2/R5900.h"
 #include "pcsx2/SIO/Pad/Pad.h"
 #include "pcsx2/VMManager.h"
 #include "common/Console.h"
@@ -69,9 +71,22 @@ namespace
 	u32 s_frame_generation = 0;
 	u32 s_artifact_index = 0;
 	std::map<std::string, std::string> s_states;
-	const std::vector<std::string_view> s_methods = {"hello", "status", "boot", "pause", "resume", "reset", "stop", "shutdown",
+	std::vector<std::string_view> s_methods = {"hello", "status", "boot", "pause", "resume", "reset", "stop", "shutdown",
 		"memory.read", "memory.write", "registers.read", "frame.advance", "input.set", "input.reset", "input.bindings",
 		"breakpoint.add", "breakpoint.remove", "breakpoint.list", "state.save", "state.load", "capture", "ee.step"};
+
+	// Call graph instrumentation is absent unless --calltrace or CARACU_CALLTRACE selects it.
+	// "methods" adds the calltrace.* methods with recording off; "record" also records from
+	// host start and writes one final trace when the host shuts down.
+	enum class CallTraceMode
+	{
+		Off,
+		Methods,
+		Record,
+	};
+	CallTraceMode s_calltrace_mode = CallTraceMode::Off;
+	bool s_calltrace_final_written = false;
+	const std::vector<std::string_view> s_calltrace_methods = {"calltrace.start", "calltrace.stop", "calltrace.dump", "calltrace.configure"};
 
 	std::string Utf8(const fs::path& path)
 	{
@@ -149,7 +164,99 @@ namespace
 		result.AddMember("pid", static_cast<u32>(GetCurrentProcessId()), alloc);
 		result.AddMember("elf_booted", VMManager::Internal::HasBootedELF(), alloc);
 		result.AddMember("breakpoint_triggered", CBreakPoints::GetBreakpointTriggered(), alloc);
+		if (s_calltrace_mode != CallTraceMode::Off)
+		{
+			Json trace(rapidjson::kObjectType);
+			Add(trace, "mode", s_calltrace_mode == CallTraceMode::Record ? "record" : "methods", alloc);
+			trace.AddMember("recording", CallTrace::g_recording, alloc);
+			trace.AddMember("events", static_cast<uint64_t>(CallTrace::Events()), alloc);
+			trace.AddMember("edges", static_cast<uint64_t>(CallTrace::EdgeCount()), alloc);
+			Add(trace, "ee_core_configured", EmuConfig.Cpu.Recompiler.EnableEE ? "recompiler" : "interpreter", alloc);
+			Add(trace, "ee_cpu_last_used", Cpu == &intCpu ? "interpreter" : "recompiler", alloc);
+			const LimiterModeType limiter = VMManager::GetLimiterMode();
+			Add(trace, "limiter", limiter == LimiterModeType::Unlimited ? "unlimited" : limiter == LimiterModeType::Nominal ? "nominal" : "other", alloc);
+			result.AddMember("calltrace", trace, alloc);
+		}
 		return result;
+	}
+
+	bool WriteCallTrace(std::string_view reason, std::string& path, std::string& error)
+	{
+		const std::string directory = Path::Combine(s_root, "calltrace");
+		if (!FileSystem::DirectoryExists(directory.c_str()) && !FileSystem::CreateDirectoryPath(directory.c_str(), false))
+		{
+			error = "could not create the calltrace artifact directory";
+			return false;
+		}
+		path = Path::Combine(directory, fmt::format("calltrace-{}.json", ++s_artifact_index));
+		if (FileSystem::FileExists(path.c_str()))
+		{
+			error = "refusing to overwrite a calltrace artifact";
+			return false;
+		}
+		rapidjson::Document document;
+		document.SetObject();
+		Allocator& alloc = document.GetAllocator();
+		Add(document, "format", "caracu-calltrace-1", alloc);
+		Add(document, "reason", reason, alloc);
+		Json identity = Identity(alloc);
+		document.AddMember("identity", identity, alloc);
+		Add(document, "kinds",
+			"jal and j: immediate target; jalr and jr: register target read before the delay slot; "
+			"jr with rs == ra (returns) is not recorded; from is the PC of the jump, word the instruction executed there",
+			alloc);
+		document.AddMember("events", static_cast<uint64_t>(CallTrace::Events()), alloc);
+		const std::vector<CallTrace::Edge> edges = CallTrace::Snapshot();
+		document.AddMember("edge_count", static_cast<uint64_t>(edges.size()), alloc);
+		Json list(rapidjson::kArrayType);
+		list.Reserve(static_cast<rapidjson::SizeType>(edges.size()), alloc);
+		for (const CallTrace::Edge& edge : edges)
+		{
+			Json item(rapidjson::kObjectType);
+			Add(item, "from", fmt::format("0x{:08X}", edge.from), alloc);
+			Add(item, "to", fmt::format("0x{:08X}", edge.to), alloc);
+			Add(item, "kind", CallTrace::KindName(edge.kind), alloc);
+			Add(item, "word", fmt::format("0x{:08X}", edge.word), alloc);
+			item.AddMember("count", static_cast<uint64_t>(edge.count), alloc);
+			list.PushBack(item, alloc);
+		}
+		document.AddMember("edges", list, alloc);
+		rapidjson::StringBuffer buffer;
+		rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+		document.Accept(writer);
+		auto file = FileSystem::OpenManagedCFile(path.c_str(), "wb");
+		if (!file || std::fwrite(buffer.GetString(), 1, buffer.GetSize(), file.get()) != buffer.GetSize() ||
+			std::fflush(file.get()) != 0)
+		{
+			error = "could not write the calltrace artifact";
+			return false;
+		}
+		return true;
+	}
+
+	void FinalCallTraceDump()
+	{
+		if (s_calltrace_mode != CallTraceMode::Record || s_calltrace_final_written)
+			return;
+		s_calltrace_final_written = true;
+		std::string path, error;
+		if (WriteCallTrace("host shutdown", path, error))
+			fmt::print(stderr, "calltrace final dump: {}\n", path);
+		else
+			fmt::print(stderr, "calltrace final dump failed: {}\n", error);
+	}
+
+	bool ParseCallTraceMode(std::wstring_view value, CallTraceMode& mode)
+	{
+		if (value.empty() || value == L"off")
+			mode = CallTraceMode::Off;
+		else if (value == L"methods")
+			mode = CallTraceMode::Methods;
+		else if (value == L"record")
+			mode = CallTraceMode::Record;
+		else
+			return false;
+		return true;
 	}
 
 	bool StringParam(const Json& params, const char* key, std::string& value)
@@ -253,6 +360,7 @@ namespace
 		if (method == "shutdown")
 		{
 			s_resume_after_dispatch = false;
+			FinalCallTraceDump();
 			if (VMManager::HasValidVM())
 				VMManager::Shutdown(false);
 			s_media.clear();
@@ -444,6 +552,54 @@ namespace
 			result.AddMember("width", width, alloc);
 			result.AddMember("height", height, alloc);
 			result.AddMember("uniform", uniform, alloc);
+			return Respond(id, std::move(result), alloc);
+		}
+		// Reachable only when the calltrace methods were added to s_methods.
+		if (method == "calltrace.start" || method == "calltrace.stop")
+		{
+			bool clear = true;
+			if (params.HasMember("clear"))
+			{
+				if (!params["clear"].IsBool())
+					return Fail(id, -32602, "clear must be a boolean", alloc);
+				clear = params["clear"].GetBool();
+			}
+			if (method == "calltrace.start")
+				CallTrace::Start(clear);
+			else
+				CallTrace::Stop();
+			// Recompiled blocks carry the record calls only if compiled while recording.
+			VMManager::Internal::ClearCPUExecutionCaches();
+			return Respond(id, Identity(alloc), alloc);
+		}
+		if (method == "calltrace.configure")
+		{
+			std::string core, limiter;
+			const bool has_core = params.HasMember("ee_core");
+			const bool has_limiter = params.HasMember("limiter");
+			if ((has_core && (!StringParam(params, "ee_core", core) || (core != "interpreter" && core != "recompiler"))) ||
+				(has_limiter && (!StringParam(params, "limiter", limiter) || (limiter != "nominal" && limiter != "unlimited"))))
+				return Fail(id, -32602, "ee_core must be interpreter or recompiler; limiter nominal or unlimited", alloc);
+			if (has_core)
+			{
+				{
+					auto lock = Host::GetSettingsLock();
+					s_settings.SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", core == "recompiler");
+				}
+				// The CPU switch itself happens at the next VMManager::Execute().
+				VMManager::ApplySettings();
+			}
+			if (has_limiter)
+				VMManager::SetLimiterMode(limiter == "unlimited" ? LimiterModeType::Unlimited : LimiterModeType::Nominal);
+			return Respond(id, Identity(alloc), alloc);
+		}
+		if (method == "calltrace.dump")
+		{
+			std::string path, error;
+			if (!WriteCallTrace("calltrace.dump", path, error))
+				return Fail(id, -32026, error, alloc);
+			Json result = Identity(alloc);
+			Add(result, "path", path, alloc);
 			return Respond(id, std::move(result), alloc);
 		}
 		std::string cpu;
@@ -767,6 +923,7 @@ void Host::RequestVMShutdown(bool, bool, bool)
 int wmain(int argc, wchar_t** argv)
 {
 	std::string root, bios;
+	bool calltrace_argument = false;
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::wstring_view arg(argv[i]);
@@ -777,7 +934,16 @@ int wmain(int argc, wchar_t** argv)
 				GIT_HASH);
 			return 0;
 		}
-		if ((arg == L"--session-dir" || arg == L"--bios") && i + 1 < argc)
+		if (arg == L"--calltrace" && i + 1 < argc && !calltrace_argument)
+		{
+			calltrace_argument = true;
+			if (!ParseCallTraceMode(argv[++i], s_calltrace_mode))
+			{
+				fmt::print(stderr, "--calltrace must be off, methods or record\n");
+				return 2;
+			}
+		}
+		else if ((arg == L"--session-dir" || arg == L"--bios") && i + 1 < argc)
 		{
 			std::string& value = arg == L"--session-dir" ? root : bios;
 			if (!value.empty())
@@ -790,6 +956,18 @@ int wmain(int argc, wchar_t** argv)
 			return 2;
 		}
 	}
+	if (const wchar_t* environment = _wgetenv(L"CARACU_CALLTRACE"); !calltrace_argument && environment)
+	{
+		if (!ParseCallTraceMode(environment, s_calltrace_mode))
+		{
+			fmt::print(stderr, "CARACU_CALLTRACE must be off, methods or record\n");
+			return 2;
+		}
+	}
+	if (s_calltrace_mode != CallTraceMode::Off)
+		s_methods.insert(s_methods.end(), s_calltrace_methods.begin(), s_calltrace_methods.end());
+	if (s_calltrace_mode == CallTraceMode::Record)
+		CallTrace::Start(true);
 	if (root.empty() || GetFileType(GetStdHandle(STD_INPUT_HANDLE)) != FILE_TYPE_PIPE)
 	{
 		fmt::print(stderr, "An explicit --session-dir and piped stdin are required\n");
@@ -857,6 +1035,7 @@ int wmain(int argc, wchar_t** argv)
 	reader.join();
 	s_resume_after_dispatch = false;
 	CompleteFrameRequest();
+	FinalCallTraceDump();
 	if (VMManager::GetState() != VMState::Shutdown)
 		VMManager::Shutdown(false);
 	VMManager::Internal::CPUThreadShutdown();

@@ -3,6 +3,7 @@
 
 #include "Common.h"
 #include "R5900OpcodeTables.h"
+#include "DebugTools/CallTrace.h"
 #include "x86/iR5900.h"
 
 using namespace x86Emitter;
@@ -25,14 +26,41 @@ REC_SYS_DEL(JALR, _Rd_);
 
 #else
 
+// Call graph recording (DebugTools/CallTrace.h). Emitted only while recording was
+// enabled when the block was compiled, right after the delay slot and before the
+// block-ending branch, so a delay-slot exception does not record a jump that did
+// not happen. With recording off, the generated code is unchanged.
+static void EmitCallTraceImm(void (*record)(u32, u32), u32 from, u32 word, u32 target)
+{
+	iFlushCall(FLUSH_EVERYTHING);
+	xMOV(ptr32[&CallTrace::g_emit_word], word);
+	xFastCall(record, from, target);
+}
+
+// Register jumps: the target is in eax, as SetBranchReg() expects. Store it in
+// cpuRegs.pc first (SetBranchReg does the same), because flushing may use rax.
+static void EmitCallTraceReg(void (*record)(u32), u32 from, u32 word)
+{
+	xMOV(ptr32[&cpuRegs.pc], eax);
+	iFlushCall(FLUSH_EVERYTHING);
+	xMOV(ptr32[&CallTrace::g_emit_word], word);
+	xFastCall(record, from);
+	xMOV(eax, ptr32[&cpuRegs.pc]);
+}
+
 ////////////////////////////////////////////////////
 void recJ()
 {
 	EE::Profiler.EmitOp(eeOpcode::J);
+	// pc already points at the delay slot while the jump itself is recompiled.
+	const u32 trace_from = pc - 4;
+	const u32 trace_word = cpuRegs.code;
 
 	// SET_FPUSTATE;
 	u32 newpc = (_InstrucTarget_ << 2) + (pc & 0xf0000000);
 	recompileNextInstruction(true, false);
+	if (CallTrace::g_recording)
+		EmitCallTraceImm(CallTrace::RecordJ, trace_from, trace_word, newpc);
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
 		SetBranchImm(vtlb_V2P(newpc));
 	else
@@ -43,6 +71,8 @@ void recJ()
 void recJAL()
 {
 	EE::Profiler.EmitOp(eeOpcode::JAL);
+	const u32 trace_from = pc - 4;
+	const u32 trace_word = cpuRegs.code;
 
 	u32 newpc = (_InstrucTarget_ << 2) + (pc & 0xf0000000);
 	_deleteEEreg(31, 0);
@@ -59,6 +89,8 @@ void recJAL()
 	}
 
 	recompileNextInstruction(true, false);
+	if (CallTrace::g_recording)
+		EmitCallTraceImm(CallTrace::RecordJal, trace_from, trace_word, newpc);
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
 		SetBranchImm(vtlb_V2P(newpc));
 	else
@@ -74,6 +106,10 @@ void recJAL()
 void recJR()
 {
 	EE::Profiler.EmitOp(eeOpcode::JR);
+	const u32 trace_from = pc - 4;
+	const u32 trace_word = cpuRegs.code;
+	// Returns (jr ra) are not recorded.
+	const bool trace = CallTrace::g_recording && _Rs_ != 31;
 
 	const bool swap = EmuConfig.Gamefixes.GoemonTlbHack ? false : TrySwapDelaySlot(_Rs_, 0, 0, true);
 	if (!swap)
@@ -116,6 +152,8 @@ void recJR()
 
 
 	// Target passed in eax
+	if (trace)
+		EmitCallTraceReg(CallTrace::RecordJrFromPC, trace_from, trace_word);
 	SetBranchReg();
 }
 
@@ -123,6 +161,9 @@ void recJR()
 void recJALR()
 {
 	EE::Profiler.EmitOp(eeOpcode::JALR);
+	const u32 trace_from = pc - 4;
+	const u32 trace_word = cpuRegs.code;
+	const bool trace = CallTrace::g_recording;
 
 	const u32 newpc = pc + 4;
 	const bool swap = (EmuConfig.Gamefixes.GoemonTlbHack || _Rd_ == _Rs_) ? false : TrySwapDelaySlot(_Rs_, 0, _Rd_, true);
@@ -185,6 +226,8 @@ void recJALR()
 	}
 
 	// Target passed in eax
+	if (trace)
+		EmitCallTraceReg(CallTrace::RecordJalrFromPC, trace_from, trace_word);
 	SetBranchReg();
 }
 

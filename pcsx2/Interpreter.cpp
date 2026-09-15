@@ -8,6 +8,7 @@
 #include "Cache.h"
 
 #include "DebugTools/Breakpoints.h"
+#include "DebugTools/CallTrace.h"
 #include "DebugTools/Step.h"
 
 #include "common/FastJmp.h"
@@ -312,13 +313,19 @@ namespace OpcodeImpl {
 // fixme: looking at the other branching code, shouldn't those _SetLinks in BGEZAL and such only be set
 // if the condition is true? --arcum42
 
+// Call graph recording happens before doBranch(): intEventTest() may leave through
+// fastjmp. cpuRegs.pc already points at the delay slot and cpuRegs.code is the jump.
 void J()
 {
+	if (CallTrace::g_recording) [[unlikely]]
+		CallTrace::Record(CallTrace::Kind::J, cpuRegs.pc - 4, _JumpTarget_, cpuRegs.code);
 	doBranch(_JumpTarget_);
 }
 
 void JAL()
 {
+	if (CallTrace::g_recording) [[unlikely]]
+		CallTrace::Record(CallTrace::Kind::Jal, cpuRegs.pc - 4, _JumpTarget_, cpuRegs.code);
 	// 0x3563b8 is the start address of the function that invalidate entry in TLB cache
 	if (EmuConfig.Gamefixes.GoemonTlbHack) {
 		if (_JumpTarget_ == 0x3563b8)
@@ -522,6 +529,8 @@ void BGEZALL()   // Branch if Rs >= 0 and link
 *********************************************************/
 void JR()
 {
+	if (CallTrace::g_recording && _Rs_ != 31) [[unlikely]]
+		CallTrace::Record(CallTrace::Kind::Jr, cpuRegs.pc - 4, cpuRegs.GPR.r[_Rs_].UL[0], cpuRegs.code);
 	// 0x33ad48 and 0x35060c are the return address of the function (0x356250) that populate the TLB cache
 	if (EmuConfig.Gamefixes.GoemonTlbHack) {
 		const u32 add = cpuRegs.GPR.r[_Rs_].UL[0];
@@ -534,6 +543,9 @@ void JR()
 void JALR()
 {
 	const u32 temp = cpuRegs.GPR.r[_Rs_].UL[0];
+
+	if (CallTrace::g_recording) [[unlikely]]
+		CallTrace::Record(CallTrace::Kind::Jalr, cpuRegs.pc - 4, temp, cpuRegs.code);
 
 	if (_Rd_)  _SetLink(_Rd_);
 

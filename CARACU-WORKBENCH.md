@@ -110,6 +110,33 @@ further commands after transport timeout because their outcome is uncertain.
 The exact executable SHA identifies dirty builds; `hello` also reports the base
 commit and whether the source was dirty at configure time.
 
+### Optional EE call-graph recording (branch `codex/decomp-calltrace`)
+
+Absent by default. `--calltrace methods` (or `CARACU_CALLTRACE=methods` in the
+child environment; the argument wins) adds four methods to `hello.methods`;
+`record` also starts recording at host start and writes one final trace on
+`shutdown`/exit. Without the option the method list, replies and generated EE
+code are unchanged, and `calltrace.*` return -32601 like any unknown method.
+
+- `calltrace.start {clear?=true}` / `calltrace.stop`: VM paused. Both clear the
+  CPU execution caches, because the recompiler emits the record call only in
+  blocks compiled while recording is on.
+- `calltrace.dump`: writes a new `<session-dir>/calltrace/calltrace-N.json`
+  (`format caracu-calltrace-1`) with the host identity (ELF, `pcsx2_elf_id`,
+  media, build, generation) and aggregated edges
+  `{from, to, kind, word, count}`; never overwrites.
+- `calltrace.configure {ee_core?: interpreter|recompiler, limiter?: nominal|unlimited}`:
+  switches the EE core through the settings layer (effective at the next
+  `Execute`) and the speed limiter, for measurements; replies with `calltrace`
+  status including `ee_cpu_last_used`.
+
+Kinds: `jal`, `jalr`, `j`, and `jr` with `rs != ra` (returns are not recorded).
+`from` is the PC of the jump, `word` the executed instruction. The interpreter
+records before the delay slot (its event test may leave through fastjmp); the
+recompiler records after the delay slot, immediately before the block exit.
+Recording runs on the EE thread into an open-addressing table; no locking.
+Branch-and-link `bgezal/bltzal` are not recorded. IOP is not instrumented.
+
 ### Bounded evidence and remaining limits
 
 Caracu's `mcp/tests/test_sessions_live.py` and `test_sessions_mcp.py` passed eight
