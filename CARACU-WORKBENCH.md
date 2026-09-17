@@ -137,6 +137,17 @@ recompiler records after the delay slot, immediately before the block exit.
 Recording runs on the EE thread into an open-addressing table; no locking.
 Branch-and-link `bgezal/bltzal` are not recorded. IOP is not instrumented.
 
+### RAM hash for differential tests (branch `codex/rota-c-hash-ram`)
+
+`memory.hash {cpu: ee|iop, address, length, algorithm?: xxh3_128|md5}` hashes a
+range of main RAM (or its KSEG0/KSEG1 alias) inside the host and replies with
+`{algorithm, hash, address, length}`. Unlike `memory.read` it accepts the whole
+RAM (32 MiB for the EE, 2 MiB for the IOP) in one call, because the digest is
+computed on the CPU thread at the dispatch barrier, directly over `eeMem->Main`
+/`iopMem->Main`. `xxh3_128` (default) is the canonical big-endian hex of
+XXH3-128; `md5` exists so a client can check the range against its own reading.
+It reads nothing outside main RAM: no scratchpad, VU, GS or hardware registers.
+
 ### Bounded evidence and remaining limits
 
 Caracu's `mcp/tests/test_sessions_live.py` and `test_sessions_mcp.py` passed eight

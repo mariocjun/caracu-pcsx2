@@ -12,6 +12,7 @@
 #include "pcsx2/ImGui/FullscreenUI.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "pcsx2/MTGS.h"
+#include "pcsx2/MemoryTypes.h"
 #include "pcsx2/R5900.h"
 #include "pcsx2/SIO/Pad/Pad.h"
 #include "pcsx2/VMManager.h"
@@ -19,6 +20,7 @@
 #include "common/Error.h"
 #include "common/FileSystem.h"
 #include "common/Image.h"
+#include "common/MD5Digest.h"
 #include "common/MemorySettingsInterface.h"
 #include "common/Path.h"
 #include "common/RedtapeWindows.h"
@@ -28,6 +30,12 @@
 #include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
+
+#ifndef XXH_versionNumber
+#define XXH_STATIC_LINKING_ONLY 1
+#define XXH_INLINE_ALL 1
+#include "../3rdparty/include/xxhash.h"
+#endif
 
 #include <atomic>
 #include <charconv>
@@ -72,7 +80,7 @@ namespace
 	u32 s_artifact_index = 0;
 	std::map<std::string, std::string> s_states;
 	std::vector<std::string_view> s_methods = {"hello", "status", "boot", "pause", "resume", "reset", "stop", "shutdown",
-		"memory.read", "memory.write", "registers.read", "frame.advance", "input.set", "input.reset", "input.bindings",
+		"memory.read", "memory.write", "memory.hash", "registers.read", "frame.advance", "input.set", "input.reset", "input.bindings",
 		"breakpoint.add", "breakpoint.remove", "breakpoint.list", "state.save", "state.load", "capture", "ee.step"};
 
 	// Call graph instrumentation is absent unless --calltrace or CARACU_CALLTRACE selects it.
@@ -608,6 +616,46 @@ namespace
 		DebugInterface& debug = DebugInterface::get(cpu == "ee" ? BREAKPOINT_EE : BREAKPOINT_IOP);
 		Json result = Identity(alloc);
 		Add(result, "cpu", cpu, alloc);
+		if (method == "memory.hash")
+		{
+			// Whole-RAM observable for differential tests. Runs on the CPU thread like memory.read, with the VM
+			// stopped at the dispatch barrier, and hashes main RAM in place: 32 MiB costs milliseconds here and
+			// about 2 000 bounded memory.read calls outside the host.
+			u32 address = 0, length = 0;
+			std::string algorithm = "xxh3_128";
+			if (!HexAddress(params, address) || !UintParam(params, "length", length))
+				return Fail(id, -32602, "address (0x plus eight hexadecimal digits) and length are required", alloc);
+			if (params.HasMember("algorithm") &&
+				(!StringParam(params, "algorithm", algorithm) || (algorithm != "xxh3_128" && algorithm != "md5")))
+				return Fail(id, -32602, "algorithm must be xxh3_128 or md5", alloc);
+			u32 physical = address;
+			if (physical >= 0x80000000u && physical < 0xC0000000u)
+				physical -= physical < 0xA0000000u ? 0x80000000u : 0xA0000000u;
+			const u32 size = cpu == "ee" ? Ps2MemSize::MainRam : Ps2MemSize::IopRam;
+			if (length == 0 || physical >= size || length > size - physical)
+				return Fail(id, -32602, "hash range must lie inside main RAM or its KSEG0/KSEG1 aliases", alloc);
+			const u8* data = (cpu == "ee" ? eeMem->Main : iopMem->Main) + physical;
+			std::string digest;
+			if (algorithm == "md5")
+			{
+				MD5Digest md5;
+				md5.Update(data, length);
+				u8 out[16];
+				md5.Final(out);
+				for (u8 byte : out)
+					digest += fmt::format("{:02x}", byte);
+			}
+			else
+			{
+				const XXH128_hash_t value = XXH3_128bits(data, length);
+				digest = fmt::format("{:016x}{:016x}", value.high64, value.low64);
+			}
+			Add(result, "algorithm", algorithm, alloc);
+			Add(result, "hash", digest, alloc);
+			Add(result, "address", fmt::format("0x{:08X}", address), alloc);
+			result.AddMember("length", length, alloc);
+			return Respond(id, std::move(result), alloc);
+		}
 		if (method == "breakpoint.add" || method == "breakpoint.remove" || method == "breakpoint.list")
 		{
 			const BreakPointCpu target = cpu == "ee" ? BREAKPOINT_EE : BREAKPOINT_IOP;
