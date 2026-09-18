@@ -9,6 +9,7 @@
 #include "pcsx2/DebugTools/Step.h"
 #include "pcsx2/GS.h"
 #include "pcsx2/Host.h"
+#include "pcsx2/Host/AudioStream.h"
 #include "pcsx2/ImGui/FullscreenUI.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "pcsx2/MTGS.h"
@@ -881,7 +882,11 @@ namespace
 		VMManager::Internal::SetBlockSystemConsole(true);
 		VMManager::SetDefaultSettings(s_settings, true, true, true, true, true);
 		s_settings.SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::DX11));
-		s_settings.SetStringValue("SPU2/Output", "OutputModule", "nullout");
+		// O PCSX2 renomeou a configuracao de audio: a chave antiga SPU2/Output/OutputModule ("nullout")
+		// NAO existe mais nesta arvore -- escreve-la nao faz nada, e foi assim que o som voltou a vazar
+		// pelo dispositivo padrao. A secao agora tem Backend (Null/Cubeb/SDL) e OutputMuted.
+		s_settings.SetStringValue("SPU2/Output", "Backend", "Null");
+		s_settings.SetBoolValue("SPU2/Output", "OutputMuted", true);
 		s_settings.SetBoolValue("Logging", "EnableSystemConsole", false);
 		s_settings.SetBoolValue("Logging", "EnableFileLogging", false);
 		s_settings.SetBoolValue("PINE", "Enabled", false);
@@ -1053,6 +1058,12 @@ int wmain(int argc, wchar_t** argv)
 	if (!VMManager::Internal::CPUThreadInitialize())
 		return 4;
 	VMManager::ApplySettings();
+	// Trava contra a proxima renomeacao: host de automacao que toca som nao esta headless.
+	if (EmuConfig.SPU2.Backend != AudioBackend::Null)
+	{
+		fmt::print(stderr, "saida de audio nao ficou em Null (chave de configuracao renomeada?)\n");
+		return 6;
+	}
 	std::thread reader(ReadRequests);
 	while (!s_exit.load())
 	{
