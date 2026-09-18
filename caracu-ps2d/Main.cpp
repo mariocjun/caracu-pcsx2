@@ -24,6 +24,9 @@
 #include "common/MemorySettingsInterface.h"
 #include "common/Path.h"
 #include "common/RedtapeWindows.h"
+#if defined(_WIN32)
+#include <timeapi.h>
+#endif
 #include "common/StringUtil.h"
 #include "svnrev.h"
 
@@ -970,6 +973,14 @@ void Host::RequestVMShutdown(bool, bool, bool)
 
 int wmain(int argc, wchar_t** argv)
 {
+#if defined(_WIN32)
+	// O PCSX2 so levanta a resolucao do temporizador enquanto a VM esta RODANDO
+	// (VMManager::SetTimerResolutionIncreased, chamado em SetState). Este host serve comandos com a
+	// VM PAUSADA, e ai a resolucao volta ao padrao do Windows, 15,6 ms: toda espera do laco de
+	// comandos passa a custar isso. Medido: mediana de 15,88 ms por comando que chega ao host,
+	// identica para trabalho nulo e para 8 MiB de hash, contra 1,88 ms para comando que nao chega.
+	timeBeginPeriod(1);
+#endif
 	std::string root, bios;
 	bool calltrace_argument = false;
 	for (int i = 1; i < argc; ++i)
